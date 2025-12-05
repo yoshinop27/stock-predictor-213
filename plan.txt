@@ -1,0 +1,9 @@
+Preplanning: Know what data we need, specific rows -> Clean data
+
+1. Prompt user to upload to files
+    1.a extract info from files
+2. Create memory on the CPU
+3. Transfer memory to the GPU
+4. Moving average forecasting
+5. Send summary statistics back to CPU
+6. Display to user

@@ -1,0 +1,4 @@
+Calculating moving averages:
+    time period: 1 month
+    sum closing prices over entire period
+    
