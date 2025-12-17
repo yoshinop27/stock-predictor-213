@@ -1,5 +1,0 @@
-Calculating moving averages:
-    time period: 1 month
-    sum closing prices over entire period
-    divide by period
-    calculate some recent trend
