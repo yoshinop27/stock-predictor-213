@@ -58,10 +58,13 @@ int main(int argc, char** argv){
     // close the file
     fclose(file);
 
-    // Num of threads per block
     int num_threads_total = i - (PERIOD - 1);
+    if (num_threads_total <= 0) {
+        printf("Not enough data points. Need at least 30 days.\n");
+        return 1;
+    }
 
-    // Moving data to the GPU for SMAs
+    float* gpu_data;
     float* gpu_data;
     if (cudaMalloc(&gpu_data, sizeof(float) * i) != cudaSuccess) {
         fprintf(stderr, "Failed to allocate data on GPU\n");
@@ -82,11 +85,11 @@ int main(int argc, char** argv){
         return 1;
     }
 
-    // Memory allocation for RSI
     float* gpu_rsi_output;
     if (cudaMalloc(&gpu_rsi_output, sizeof(float) * i) != cudaSuccess) {
-        fprintf(stderr, "Failed to allocate SMA output on GPU\n");
+        fprintf(stderr, "Failed to allocate RSI output on GPU\n");
         cudaFree(gpu_data);
+        cudaFree(gpu_sma_output);
         return 1;
     }
 
@@ -124,28 +127,34 @@ int main(int argc, char** argv){
 
     printf("SMA: %f\n", average_difference);
 
-    // Calculate average RSI change
-
-    float pos_rsi;
-    float neg_rsi;
+    float pos_rsi = 0.0f;
+    float neg_rsi = 0.0f;
+    int gain_count = 0;
+    int loss_count = 0;
     for (int day = 1; day < i; day++) {
         if (rsi_results[day] > 0) {
             pos_rsi += rsi_results[day];
-        } else {
-            neg_rsi += rsi_results[day];
+            gain_count++;
+        } else if (rsi_results[day] < 0) {
+            neg_rsi += fabs(rsi_results[day]);
+            loss_count++;
         }
     }
-    float avg_gain = pos_rsi / (i - 1);
-    float avg_loss = neg_rsi / (i - 1);
+    float avg_gain = gain_count > 0 ? pos_rsi / gain_count : 0.0f;
+    float avg_loss = loss_count > 0 ? neg_rsi / loss_count : 0.0f;
 
-    float final_rsi = 100 - (100 / (1 + (avg_gain / fabs(avg_loss)))); // geeksforgeeks.org/c/fabs-function-in-c
+    float final_rsi = 0.0f;
+    if (avg_loss > 0.0f) {
+        float rs = avg_gain / avg_loss;
+        final_rsi = 100.0f - (100.0f / (1.0f + rs));
+    }
 
 
     printf("RSI: %f\n", final_rsi);
 
-    // Free all memory
     cudaFree(gpu_data);
     cudaFree(gpu_sma_output);
+    cudaFree(gpu_rsi_output);
 }
 
 // Function to calculate SMAs over a dataset
