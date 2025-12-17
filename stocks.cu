@@ -8,26 +8,8 @@
 #define PERIOD 30
 #define MAX_DAYS 200
 
-// Function to calculate SMAs over a dataset
-__global__ void kernel (float* data, float* sma_output, int length) {
-    int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int day = thread_idx + (PERIOD - 1);
-    if (day >= length) {
-        return;
-    }
-
-    // Move to start of period (period days before current day)
-    float* first_day = data + (day - (PERIOD - 1));
-
-    // calculate sum
-    float sum = 0;
-    for (int i = 0; i < PERIOD; i++){
-        sum += first_day[i];
-    }
-
-    // calculate sma and store result
-    sma_output[day] = sum / PERIOD;   
-}
+// defining functions
+__global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, int length);
 
 int main(int argc, char** argv){
 
@@ -76,12 +58,10 @@ int main(int argc, char** argv){
     // close the file
     fclose(file);
 
+    // Num of threads per block
     int num_threads_total = i - (PERIOD - 1);
-    if (num_threads_total <= 0) {
-        printf("Not enough data points. Need at least 30 days.\n");
-        return 1;
-    }
 
+    // Moving data to the GPU for SMAs
     float* gpu_data;
     if (cudaMalloc(&gpu_data, sizeof(float) * i) != cudaSuccess) {
         fprintf(stderr, "Failed to allocate data on GPU\n");
@@ -102,37 +82,104 @@ int main(int argc, char** argv){
         return 1;
     }
 
-    int threads_per_block = 256;
-    int num_blocks = (num_threads_total + threads_per_block - 1) / threads_per_block;
-    kernel<<<num_blocks, threads_per_block>>>(gpu_data, gpu_sma_output, i);
+    // Memory allocation for RSI
+    float* gpu_rsi_output;
+    if (cudaMalloc(&gpu_rsi_output, sizeof(float) * i) != cudaSuccess) {
+        fprintf(stderr, "Failed to allocate SMA output on GPU\n");
+        cudaFree(gpu_data);
+        return 1;
+    }
+
+    // Run Kernel
+    int threads_per_block = 90;
+    kernel<<<2, threads_per_block>>>(gpu_data, gpu_sma_output, gpu_rsi_output, i);
 
     cudaDeviceSynchronize();
 
-    float* sma_results = malloc(sizeof(float) * i);
+    // Copy results back to host
 
+    float sma_results[i];
     if (cudaMemcpy(sma_results, gpu_sma_output, sizeof(float) * i, cudaMemcpyDeviceToHost) != cudaSuccess) {
         fprintf(stderr, "Failed to copy results from GPU\n");
     }
 
+    float rsi_results[i];
+    if (cudaMemcpy(rsi_results, gpu_rsi_output, sizeof(float) * i, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        fprintf(stderr, "Failed to copy results from GPU\n");
+    }
+
+    // Calculate average difference of SMAs with discounting factor
+
     float differences[num_threads_total-1];
-    float discounting_factor = 0.99f;
-    int k = 1;
     for (int day = PERIOD; day < i; day++) {
-        differences[day - PERIOD] = (sma_results[day] - sma_results[day - 1]) * powf(discounting_factor, k);
-        k++;
+        differences[day - PERIOD] = (sma_results[day] - sma_results[day - 1]);
     }
 
     float average_difference = 0;
+    float discounting_factor = 0.99f;
     for (int j = 0; j < num_threads_total - 1; j++) {
-        average_difference += differences[j];
+        average_difference += differences[j] * powf(discounting_factor, j);
     }
     average_difference /= (num_threads_total - 1);
 
-    printf("%f\n", average_difference);
+    printf("SMA: %f\n", average_difference);
 
-    free(sma_results);
+    // Calculate average RSI change
+
+    float pos_rsi;
+    float neg_rsi;
+    for (int day = 1; day < i; day++) {
+        if (rsi_results[day] > 0) {
+            pos_rsi += rsi_results[day];
+        } else {
+            neg_rsi += rsi_results[day];
+        }
+    }
+    float avg_gain = pos_rsi / (i - 1);
+    float avg_loss = neg_rsi / (i - 1);
+
+    float final_rsi = 100 - (100 / (1 + (avg_gain / fabs(avg_loss)))); // geeksforgeeks.org/c/fabs-function-in-c
+
+
+    printf("RSI: %f\n", final_rsi);
 
     // Free all memory
     cudaFree(gpu_data);
     cudaFree(gpu_sma_output);
+}
+
+// Function to calculate SMAs over a dataset
+__global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, int length) {
+    switch(blockIdx.x) {
+        case 0:
+            // Simple Moving Average Calculation
+            int day = threadIdx.x + (PERIOD - 1);
+            if (day >= length) {
+                return;
+            }
+
+            // Move to start of period (period days before current day)
+            float* first_day = data + (day - (PERIOD - 1));
+
+            // calculate sum
+            float sum = 0;
+            for (int i = 0; i < PERIOD; i++){
+                sum += first_day[i];
+            }
+
+            // calculate sma and store result
+            sma_output[day] = sum / PERIOD;   
+            break;
+        case 1:
+            // Relative Strength Index
+            int day_rsi = threadIdx.x;
+            // Bounds checking
+            if (day_rsi == 0 || day_rsi >= length) {
+                return;
+            }
+
+            float change = data[day_rsi] - data[day_rsi - 1];
+            gpu_rsi_output[day_rsi] = change; // Placeholder for RSI calculation
+            break;
+    }
 }

@@ -6,9 +6,8 @@ all: stocks
 clean:
 	rm -f stocks
 
-stocks: stocks.cu algorithms/sma.cu 
-	$(CC) $(CFLAGS) -o stocks stocks.cu algorithms/sma.cu
-
+stocks: stocks.cu
+	$(CC) $(CFLAGS) -o stocks stocks.cu
 zip:
 	@echo "Generating stocks.zip file to submit to Gradescope..."
 	@zip -q -r stocks.zip . -x .git/\* .vscode/\* .clang-format .gitignore stocks 
