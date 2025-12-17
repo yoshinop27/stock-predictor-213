@@ -3,56 +3,41 @@
 
 #define MAX 1000000
 
-// create struct type
-typedef struct sma {
-    intptr_t period;
-    intptr_t sum;
-} sma_t;
-
 // create time data type
 typedef struct data {
     int values[MAX];
-    size_t length;
     int period;
+    int length;
 } data_t;
 
 
 // Function to calculate SMAs over a dataset
-__global__ void kernel (data_t* data) {
+__global__ void kernel (data_t* data, int* sma_output) {
 
     // retrieve data 
     int* values = data->values;
     int length = data->length;
     int period = data->period;
 
-    // Positional variables
-    int day = threadIdx.x;
+    // Positional variables - support multiple blocks
+    // Map thread index to day index (thread 0 -> day 29, thread 1 -> day 30, etc.)
+    int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int day = thread_idx + (period - 1);  // Add 29 to get actual day index
 
-    // Move to start of 30 day period
-    int* first_day = values + (day - 29);
+    // Bounds check: ensure we don't exceed array bounds
+    if (day >= length) {
+        return;
+    }
+
+    // Move to start of period (period days before current day)
+    int* first_day = values + (day - (period - 1));
 
     // calculate sum
     int sum = 0;
-    for (int i = 0; i <= period; i++){
-        int* cur_day = first_day + i * sizeof(int);
-        sum += *cur_day;
+    for (int i = 0; i < period; i++){
+        sum += first_day[i];
     }
 
-    // calculate sma
-    int sma = sum/period;   
-
-}
-
-// Thread Function
-void* sma_thread (void* args) {
-
-    // Cast params to appropriate fields
-    sma_t* sma_args = (sma_t*)args;
-    intptr_t period = sma_args->period;
-    intptr_t sum = sma_args->sum;
-
-    // sma calculation
-    int sma = sum/period;
-
-
+    // calculate sma and store result
+    sma_output[day] = sum / period;   
 }
