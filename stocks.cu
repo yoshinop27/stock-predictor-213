@@ -65,7 +65,6 @@ int main(int argc, char** argv){
     }
 
     float* gpu_data;
-    float* gpu_data;
     if (cudaMalloc(&gpu_data, sizeof(float) * i) != cudaSuccess) {
         fprintf(stderr, "Failed to allocate data on GPU\n");
         return 1;
