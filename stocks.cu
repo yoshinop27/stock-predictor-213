@@ -4,12 +4,13 @@
 #include <cuda_runtime.h>
 #include <stddef.h>
 #include <math.h>
+#include "util.h"
 
 #define PERIOD 30
 #define MAX_DAYS 200
 
 // defining functions
-__global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, int length);
+__global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, linreg_t linreg, int length);
 
 int main(int argc, char** argv){
 
@@ -92,14 +93,21 @@ int main(int argc, char** argv){
         return 1;
     }
 
+    linreg_t* gpu_linreg;
+    if (cudaMalloc(&gpu_linreg, sizeof(linreg_t)) != cudaSuccess) {
+        fprintf(stderr, "Failed to allocate gpu linreg output on GPU\n");
+        cudaFree(gpu_data);
+        cudaFree(gpu_linreg);
+        return 1;
+    }
+
     // Run Kernel
     int threads_per_block = 90;
-    kernel<<<2, threads_per_block>>>(gpu_data, gpu_sma_output, gpu_rsi_output, i);
+    kernel<<<2, threads_per_block>>>(gpu_data, gpu_sma_output, gpu_rsi_output, gpu_linreg, i);
 
     cudaDeviceSynchronize();
 
     // Copy results back to host
-
     float sma_results[i];
     if (cudaMemcpy(sma_results, gpu_sma_output, sizeof(float) * i, cudaMemcpyDeviceToHost) != cudaSuccess) {
         fprintf(stderr, "Failed to copy results from GPU\n");
@@ -110,8 +118,14 @@ int main(int argc, char** argv){
         fprintf(stderr, "Failed to copy results from GPU\n");
     }
 
-    // Calculate average difference of SMAs with discounting factor
+    linreg_t linreg_result;
+    if (cudaMemcpy(&linreg_result, gpu_linreg, sizeof(linreg_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        fprintf(stderr, "Failed to copy linreg results from GPU\n");
+    }
 
+    printf("Linear Regression SumY: %f\n", linreg_result.sumY);
+
+    // Calculate average difference of SMAs with discounting factor
     float differences[num_threads_total-1];
     for (int day = PERIOD; day < i; day++) {
         differences[day - PERIOD] = (sma_results[day] - sma_results[day - 1]);
@@ -148,16 +162,16 @@ int main(int argc, char** argv){
         final_rsi = 100.0f - (100.0f / (1.0f + rs));
     }
 
-
     printf("RSI: %f\n", final_rsi);
 
     cudaFree(gpu_data);
     cudaFree(gpu_sma_output);
     cudaFree(gpu_rsi_output);
+    cudaFree(gpu_linreg);
 }
 
-// Function to calculate SMAs over a dataset
-__global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, int length) {
+// Function to calculate statistics over a dataset
+__global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, linreg_t* linreg, int length) {
     switch(blockIdx.x) {
         case 0:
             // Simple Moving Average Calculation
@@ -188,6 +202,40 @@ __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, i
 
             float change = data[day_rsi] - data[day_rsi - 1];
             gpu_rsi_output[day_rsi] = change; // Placeholder for RSI calculation
+            break;
+        case 2:
+            // Linear Regression - sumY
+            __shared__ float closing_prices[PERIOD];
+            int day_lr = threadIdx.x;
+            // transfer data into a shared array that can be manipulated
+            closing_prices[day_lr] = data[day_lr];
+            __syncthreads();
+
+            // perform linear regression calculations here
+            for (int i = 0; i < PERIOD; i*=2) {
+                if (day_lr & i == 0 && day_lr + i < PERIOD) {
+                    closing_prices[day_lr] += closing_prices[day_lr + i];
+                    __syncthreads();
+                }
+            }
+            linreg->sumY = closing_prices[0];
+            break;
+        case 3:
+            // Linear Regression - sumXY
+            __shared__ float xy_prices[PERIOD];
+            int day_lr_2 = threadIdx.x;
+            // transfer data into a shared array that can be manipulated
+            xy_prices[day_lr_2] = data[day_lr_2] * day_lr_2;
+            __syncthreads();
+
+            // perform linear regression calculations here
+            for (int i = 0; i < PERIOD; i*=2) {
+                if (day_lr_2 & i == 0 && day_lr_2 + i < PERIOD) {
+                    xy_prices[day_lr_2] += xy_prices[day_lr_2 + i];
+                    __syncthreads();
+                }
+            }
+            linreg->sumXY = xy_prices[0];
             break;
     }
 }
