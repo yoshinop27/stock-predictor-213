@@ -8,6 +8,9 @@
 
 #define PERIOD 30
 #define MAX_DAYS 200
+#define LENGTH 90
+#define SUMX 4095
+#define SUMX2 247065
 
 __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, linreg_t* linreg, int length);
 
@@ -117,12 +120,10 @@ int main(int argc, char** argv){
         fprintf(stderr, "Failed to copy results from GPU\n");
     }
 
-    linreg_t linreg_result;
+    linreg_t* linreg_result;
     if (cudaMemcpy(&linreg_result, gpu_linreg, sizeof(linreg_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
         fprintf(stderr, "Failed to copy linreg results from GPU\n");
     }
-
-    printf("Linear Regression SumY: %f\n", linreg_result.sumY);
 
     // Calculate average difference of SMAs with discounting factor
     float differences[num_threads_total-1];
@@ -162,6 +163,16 @@ int main(int argc, char** argv){
     }
 
     printf("RSI: %f\n", final_rsi);
+
+    // Lin regression results
+
+    // Pull lin reg variables
+    double sumY = linreg_result->sumY;
+    double sumXY = linreg_result->sumXY;
+    double slope = (LENGTH * sumXY - SUMX * sumY) / (LENGTH * SUMX2 - SUMX * SUMX);
+    printf("Linear Regression Slope: %f\n", slope);
+    double intercept = (sumY - slope * SUMX) / LENGTH;
+    printf("Linear Regression Intercept: %f\n", intercept);
 
     cudaFree(gpu_data);
     cudaFree(gpu_sma_output);
