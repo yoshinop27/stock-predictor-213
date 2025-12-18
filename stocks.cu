@@ -12,6 +12,7 @@
 #define SUMX 4095
 #define SUMX2 247065
 
+// Function Declaration
 __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, linreg_t* linreg, int length);
 
 int main(int argc, char** argv){
@@ -60,12 +61,6 @@ int main(int argc, char** argv){
 
     // close the file
     fclose(file);
-
-    int num_threads_total = i - (PERIOD - 1);
-    if (num_threads_total <= 0) {
-        printf("Not enough data points. Need at least 30 days.\n");
-        return 1;
-    }
 
     float* gpu_data;
     if (cudaMalloc(&gpu_data, sizeof(float) * i) != cudaSuccess) {
@@ -126,17 +121,17 @@ int main(int argc, char** argv){
     }
 
     // Calculate average difference of SMAs with discounting factor
-    float differences[num_threads_total-1];
+    float differences[LENGTH - PERIOD + 1];
     for (int day = PERIOD; day < i; day++) {
         differences[day - PERIOD] = (sma_results[day] - sma_results[day - 1]);
     }
 
     float average_difference = 0;
     float discounting_factor = 0.99f;
-    for (int j = 0; j < num_threads_total - 1; j++) {
+    for (int j = 0; j < LENGTH - PERIOD + 1; j++) {
         average_difference += differences[j] * powf(discounting_factor, j);
     }
-    average_difference /= (num_threads_total - 1);
+    average_difference /= (LENGTH - PERIOD + 1);
 
     printf("SMA: %f\n", average_difference);
 
@@ -184,8 +179,8 @@ __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, l
     switch(blockIdx.x) {
         case 0:
             // Simple Moving Average Calculation
-            int day = threadIdx.x + (PERIOD - 1);
-            if (day >= length) {
+            int day = threadIdx.x;
+            if (day <= PERIOD - 1 || day >= length) {
                 return;
             }
 
@@ -213,15 +208,15 @@ __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, l
             gpu_rsi_output[day_rsi] = change; // Placeholder for RSI calculation
             break;
         case 2:
-            __shared__ float closing_prices[PERIOD];
+            __shared__ float closing_prices[LENGTH];
             int day_lr = threadIdx.x;
             if (day_lr < LENGTH) {
-                closing_prices[day_lr] = data[length - PERIOD + day_lr];
+                closing_prices[day_lr] = data[day_lr];
             }
             __syncthreads();
 
-            for (int stride = 1; stride < PERIOD; stride *= 2) {
-                if (day_lr % (2 * stride) == 0 && day_lr + stride < PERIOD) {
+            for (int stride = 1; stride < LENGTH; stride *= 2) {
+                if (day_lr % (2 * stride) == 0 && day_lr + stride < LENGTH) {
                     closing_prices[day_lr] += closing_prices[day_lr + stride];
                 }
                 __syncthreads();
@@ -234,12 +229,12 @@ __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, l
             __shared__ float xy_prices[LENGTH];
             int day_lr_2 = threadIdx.x;
             if (day_lr_2 < LENGTH) {
-                xy_prices[day_lr_2] = data[length - PERIOD + day_lr_2] * (float)day_lr_2;
+                xy_prices[day_lr_2] = data[day_lr_2] * (float)day_lr_2;
             }
             __syncthreads();
 
-            for (int stride = 1; stride < PERIOD; stride *= 2) {
-                if (day_lr_2 % (2 * stride) == 0 && day_lr_2 + stride < PERIOD) {
+            for (int stride = 1; stride < LENGTH; stride *= 2) {
+                if (day_lr_2 % (2 * stride) == 0 && day_lr_2 + stride < LENGTH) {
                     xy_prices[day_lr_2] += xy_prices[day_lr_2 + stride];
                 }
                 __syncthreads();
