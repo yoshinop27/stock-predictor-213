@@ -12,18 +12,20 @@
 #define SUMX 4095
 #define SUMX2 247065
 
-// Function Declation
 __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, linreg_t* linreg, int length);
 
 int main(int argc, char** argv){
 
     printf("This is a Stock Predictor\n");
-    // Store the user's file name
+    // Store the user's input
     char buff[100];
+
     printf("Enter a Path to the CSV file: \n");
+    
     FILE *file;
     // Loop until user gives us a good path
     while (1){
+
         // Read input from the user
         fgets(buff, sizeof(buff), stdin);
         int sizeStr = strlen(buff);
@@ -35,6 +37,7 @@ int main(int argc, char** argv){
         if ((file = fopen(buff, "r")) != NULL){
             break;
         }
+
         printf("Please provide the correct file path from the root.\n");
     }
 
@@ -50,7 +53,6 @@ int main(int argc, char** argv){
     float adj_close[MAX_DAYS];
     float volume[MAX_DAYS];
 
-    // Place information into appropriate arrays
     while (fgets(line, sizeof(line), file) != NULL && i < MAX_DAYS){
         sscanf(line, "%19[^,],%f,%f,%f,%f,%f,%f", date[i], &open[i], &high[i], &low[i], &close[i], &adj_close[i], &volume[i]);
         i++;
@@ -58,6 +60,12 @@ int main(int argc, char** argv){
 
     // close the file
     fclose(file);
+
+    int num_threads_total = i - (PERIOD - 1);
+    if (num_threads_total <= 0) {
+        printf("Not enough data points. Need at least 30 days.\n");
+        return 1;
+    }
 
     float* gpu_data;
     if (cudaMalloc(&gpu_data, sizeof(float) * i) != cudaSuccess) {
@@ -96,8 +104,8 @@ int main(int argc, char** argv){
         return 1;
     }
 
-    // All files should include last 90 days of data - To scale: Adjust length/may need multi-block approach
-    kernel<<<4, LENGTH>>>(gpu_data, gpu_sma_output, gpu_rsi_output, gpu_linreg, i);
+    int threads_per_block = 90;
+    kernel<<<4, threads_per_block>>>(gpu_data, gpu_sma_output, gpu_rsi_output, gpu_linreg, i);
 
     cudaDeviceSynchronize();
 
@@ -112,23 +120,23 @@ int main(int argc, char** argv){
         fprintf(stderr, "Failed to copy results from GPU\n");
     }
 
-    linreg_t linreg_result[1];
-    if (cudaMemcpy(&linreg_result, gpu_linreg, sizeof(linreg_t*), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    linreg_t linreg_result;
+    if (cudaMemcpy(&linreg_result, gpu_linreg, sizeof(linreg_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
         fprintf(stderr, "Failed to copy linreg results from GPU\n");
     }
 
-    // Calculate average difference of SMAs
-    float differences[LENGTH-PERIOD+1];
-    for (int day = 1; day < LENGTH; day++) {
-        differences[day] = (sma_results[day] - sma_results[day - 1]);
+    // Calculate average difference of SMAs with discounting factor
+    float differences[num_threads_total-1];
+    for (int day = PERIOD; day < i; day++) {
+        differences[day - PERIOD] = (sma_results[day] - sma_results[day - 1]);
     }
 
     float average_difference = 0;
     float discounting_factor = 0.99f;
-    for (int j = 0; j < LENGTH - PERIOD + 1; j++) {
+    for (int j = 0; j < num_threads_total - 1; j++) {
         average_difference += differences[j] * powf(discounting_factor, j);
     }
-    average_difference /= (LENGTH - PERIOD + 1);
+    average_difference /= (num_threads_total - 1);
 
     printf("SMA: %f\n", average_difference);
 
@@ -145,9 +153,8 @@ int main(int argc, char** argv){
             loss_count++;
         }
     }
-
-    float avg_gain = pos_rsi / gain_count;
-    float avg_loss = neg_rsi / loss_count;
+    float avg_gain = gain_count > 0 ? pos_rsi / gain_count : 0.0f;
+    float avg_loss = loss_count > 0 ? neg_rsi / loss_count : 0.0f;
 
     float final_rsi = 0.0f;
     if (avg_loss > 0.0f) {
@@ -159,9 +166,8 @@ int main(int argc, char** argv){
 
     // Lin regression results
 
-    // Pull lin reg variables
-    double sumY = linreg_result[0].sumY;
-    double sumXY = linreg_result[0].sumXY;
+    double sumY = linreg_result.sumY;
+    double sumXY = linreg_result.sumXY;
     double slope = (LENGTH * sumXY - SUMX * sumY) / (LENGTH * SUMX2 - SUMX * SUMX);
     printf("Linear Regression Slope: %f\n", slope);
     double intercept = (sumY - slope * SUMX) / LENGTH;
@@ -178,8 +184,8 @@ __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, l
     switch(blockIdx.x) {
         case 0:
             // Simple Moving Average Calculation
-            int day = threadIdx.x;
-            if (day >= PERIOD - 1 && day < length) {
+            int day = threadIdx.x + (PERIOD - 1);
+            if (day >= length) {
                 return;
             }
 
@@ -206,14 +212,11 @@ __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, l
             float change = data[day_rsi] - data[day_rsi - 1];
             gpu_rsi_output[day_rsi] = change; // Placeholder for RSI calculation
             break;
-        // Citations for following 2 cases:
-        // https://leimao.github.io/blog/CUDA-Reduction/
-        // https://www.cs.ucr.edu/~mchow009/teaching/cs147/winter20/slides/5-Reduction.pdf
         case 2:
             __shared__ float closing_prices[PERIOD];
             int day_lr = threadIdx.x;
-            if (day_lr < PERIOD) {
-                closing_prices[day_lr] = data[day_lr];
+            if (day_lr < LENGTH) {
+                closing_prices[day_lr] = data[length - PERIOD + day_lr];
             }
             __syncthreads();
 
@@ -228,11 +231,10 @@ __global__ void kernel (float* data, float* sma_output, float* gpu_rsi_output, l
             }
             break;
         case 3:
-            // Linear Regression - sumXY
-            __shared__ float xy_prices[PERIOD];
+            __shared__ float xy_prices[LENGTH];
             int day_lr_2 = threadIdx.x;
-            if (day_lr_2 < PERIOD) {
-                xy_prices[day_lr_2] = data[day_lr_2] * (float)day_lr_2;
+            if (day_lr_2 < LENGTH) {
+                xy_prices[day_lr_2] = data[length - PERIOD + day_lr_2] * (float)day_lr_2;
             }
             __syncthreads();
 
